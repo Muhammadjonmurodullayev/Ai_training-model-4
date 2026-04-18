@@ -1,0 +1,9 @@
+# Core
+torch>=2.1
+numpy>=1.26
+sentencepiece>=0.2.0
+
+# Data
+datasets>=2.16
+huggingface_hub>=0.20
+tqdm>=4.66
