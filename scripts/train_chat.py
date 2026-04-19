@@ -206,6 +206,9 @@ def save_ckpt(path: Path, *, model: nn.Module, cfg: TransformerConfig,
     os.replace(tmp, path)
     size_mb = path.stat().st_size / (1024 * 1024)
     print(f"  [SAVED] {path}  ({size_mb:.1f} MB)", flush=True)
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True, type=Path)
     ap.add_argument("--val", required=True, type=Path)
