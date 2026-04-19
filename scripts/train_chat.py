@@ -185,19 +185,27 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> float:
 def save_ckpt(path: Path, *, model: nn.Module, cfg: TransformerConfig,
               epoch: int, step: int, val_loss: float, best_val_loss: float,
               tokenizer_path: str) -> None:
+    """Atomic-ish save with fsync so that Drive (FUSE) actually flushes to disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model_config": dataclasses.asdict(cfg),
-        "model_state_dict": model.state_dict(),
-        "epoch": epoch,
-        "step": step,
-        "val_loss": val_loss,
-        "best_val_loss": best_val_loss,
-        "tokenizer_path": tokenizer_path,
-    }, path)
-
-
-def main() -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "wb") as fh:
+        torch.save({
+            "model_config": dataclasses.asdict(cfg),
+            "model_state_dict": model.state_dict(),
+            "epoch": epoch,
+            "step": step,
+            "val_loss": val_loss,
+            "best_val_loss": best_val_loss,
+            "tokenizer_path": tokenizer_path,
+        }, fh)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass  # fsync not supported on some FUSE backends
+    os.replace(tmp, path)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    print(f"  [SAVED] {path}  ({size_mb:.1f} MB)", flush=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True, type=Path)
     ap.add_argument("--val", required=True, type=Path)
@@ -227,6 +235,8 @@ def main() -> None:
     ap.add_argument("--log-every", type=int, default=20)
     ap.add_argument("--eval-every", type=int, default=500,
                     help="steps; also eval at end of each epoch")
+    ap.add_argument("--save-every", type=int, default=200,
+                    help="steps; force-save chat_last.pt to output_dir (Drive-safe)")
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--resume", type=Path, default=None)
@@ -313,9 +323,23 @@ def main() -> None:
         best_val = ck.get("best_val_loss", float("inf"))
         print(f"  [RESUME] from {args.resume}  epoch={start_epoch} step={global_step}")
 
+    # Resolve to absolute path so we know EXACTLY where checkpoints land.
+    args.output_dir = args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     last_path = args.output_dir / "chat_last.pt"
     best_path = args.output_dir / "chat_best.pt"
+    is_drive = "/drive/" in str(args.output_dir) or str(args.output_dir).startswith("/content/drive")
+    print(f"  [OUT ] dir       = {args.output_dir}", flush=True)
+    print(f"  [OUT ] best_path = {best_path}", flush=True)
+    print(f"  [OUT ] last_path = {last_path}", flush=True)
+    print(f"  [OUT ] on Drive? = {is_drive}", flush=True)
+    smoke = args.output_dir / ".write_test"
+    try:
+        smoke.write_text("ok")
+        smoke.unlink()
+        print("  [OUT ] write test PASSED", flush=True)
+    except Exception as e:
+        sys.exit(f"  [FAIL] cannot write to output dir: {e}")
 
     # ─── Train ──
     model.train()
@@ -358,17 +382,29 @@ def main() -> None:
                           f"loss {avg:.4f}  lr {lr:.2e}  {tps:,.0f} tok/s")
                     accum_loss, accum_n = 0.0, 0
 
+# Frequent "last" checkpoint save (Drive-safe; survives disconnect)
+                if args.save_every and global_step % args.save_every == 0:
+                    save_ckpt(last_path, model=model, cfg=cfg,
+                              epoch=epoch+1, step=global_step,
+                              val_loss=float("nan"), best_val_loss=best_val,
+                              tokenizer_path=str(args.tokenizer))
+
                 if global_step % args.eval_every == 0:
                     val_loss = evaluate(model, val_loader, device)
                     print(f"  [EVAL ] step {global_step}  val_loss {val_loss:.4f}  "
-                          f"ppl {math.exp(min(val_loss, 20)):.2f}")
+                              f"ppl {math.exp(min(val_loss, 20)):.2f}", flush=True)
                     if val_loss < best_val:
                         best_val = val_loss
                         save_ckpt(best_path, model=model, cfg=cfg,
                                   epoch=epoch+1, step=global_step,
                                   val_loss=val_loss, best_val_loss=best_val,
                                   tokenizer_path=str(args.tokenizer))
-                        print(f"  [SAVE ] best -> {best_path}  (val {val_loss:.4f})")
+                        print(f"  [SAVE ] best -> {best_path}  (val {val_loss:.4f})", flush=True)
+                    # Always update last after eval too
+                    save_ckpt(last_path, model=model, cfg=cfg,
+                              epoch=epoch+1, step=global_step,
+                              val_loss=val_loss, best_val_loss=best_val,
+                              tokenizer_path=str(args.tokenizer))
 
         # End of epoch eval + last
         val_loss = evaluate(model, val_loader, device)
