@@ -89,8 +89,7 @@ def _make_pair(user: str, assistant: str) -> Optional[dict]:
 def _load_hf(name: str, split: str = "train", config: Optional[str] = None,
              streaming: bool = True):
     from datasets import load_dataset
-    return load_dataset(name, config, split=split, streaming=streaming,
-                        trust_remote_code=True)
+    return load_dataset(name, config, split=split, streaming=streaming)
 
 
 def src_alpaca_uz(limit: int) -> Iterator[dict]:
